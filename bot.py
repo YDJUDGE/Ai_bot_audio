@@ -6,6 +6,9 @@ import telebot
 from config_bot import bot_token
 from audio_processor import AudioProcess
 from my_proof.proof import Proof
+import speech_recognition as sr
+from pydub import AudioSegment
+from langdetect import detect
 
 # Настройки логирования
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +29,8 @@ if os.path.exists(PROCESSED_FILES_PATH):
         processed_files = json.load(f)
 else:
     processed_files = {}
-    processed_messages = set()
+
+processed_messages = set()
 
 proof_instance = Proof()
 
@@ -34,6 +38,54 @@ def save_processed_files():
     """Сохраняет processed_files в файл"""
     with open(PROCESSED_FILES_PATH, "w") as f:
         json.dump(processed_files, f)
+
+def is_valid_russian_speech(audio_path):
+    """Проверяет, содержит ли аудиофайл понятную русскую речь"""
+    try:
+        # Инициализируем распознаватель речи
+        recognizer = sr.Recognizer()
+
+        # Загружаем аудиофайл
+        audio_segment = AudioSegment.from_wav(audio_path)
+        audio_segment = audio_segment.set_channels(1)
+        audio_segment = audio_segment.set_frame_rate(16000)
+        audio_segment.export(audio_path, format="wav")
+
+        # Преобразуем аудиофайл в формат, подходящий для speech_recognition
+        with sr.AudioFile(audio_path) as source:
+            audio_data = recognizer.record(source)
+
+        # Распознаём речь
+        text = recognizer.recognize_google(audio_data, language="ru-RU")
+
+        # Если текст пуст или не распознан
+        if not text or text.strip() == "":
+            logger.info("Речь не распознана")
+            return False
+
+        # Проверяем длину и количество слов:
+        if len(text) < 10 or len(text.split()) < 3:
+            logger.info(f"Текст слишком короткий или не содержит достаточное количество слов: {text}")
+            return False
+
+        # Проверяем язык текста
+        language = detect(text)
+        if language != "ru":
+            logger.info(f"Речь распознан, но язык не русский {language}")
+            return False
+
+        logger.info(f"Речь распознана, текст {text}, язык {language}")
+        return True
+
+    # Возможные ошибки
+    except sr.UnknownValueError:
+        logger.info(f"Речь не распознана, вероятно, это шум")
+        return False
+    except sr.RequestError as e:
+        logger.error(f"Ошибка при запросе к Google Speech Recognition: {e}")
+    except Exception as e:
+        logger.error(f"Другая ошибка/Ошибка при распозновании речи: {e}")
+        return False
 
 def save_audio(file_id, file_ext, message_id):
     """Сохраняет аудиофайл и возвращает путь"""
@@ -96,6 +148,16 @@ def handle_audio(message):
                 bot.reply_to(message, "Этот файл уже был отправлен ранее, но был откланён из-за низкого качества")
             else:
                 bot.reply_to(message, "Этот аудио файл уже был обработан ранее. Повторная обработка не допускается")
+            return
+
+        if not is_valid_russian_speech(audio_path):
+            logger.info(f"Аудио файл не содержит понятной русской речи, отклонено")
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+                logger.info(f"Файл удалён из-за отсутвия русской речи: {audio_path}")
+            bot.reply_to(message, "Отказ: аудиофайл не содержит понятной русской речи")
+            processed_files[file_hash] = {"status": "invalid_speech", "file_ids": [file_id]}
+            save_processed_files()
             return
 
         bot.reply_to(message, "Аудио файл сохранён")
